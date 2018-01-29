@@ -33,7 +33,6 @@ namespace coroxx
     {
             coro_context ctx;
             CoroStack* stack;
-            uint32_t stack_size;
             coro_id id;
             CoroutineDataContext data_ctx;
             void* save_buffer;

@@ -1,4 +1,4 @@
- /*
+/*
  *Copyright (c) 2013-2013, yinqiwen <yinqiwen@gmail.com>
  *All rights reserved.
  * 
@@ -38,74 +38,68 @@
 namespace coroxx
 {
 
-	class ThreadMutexLock: public ThreadMutex, public ThreadCondition
-	{
-		private:
-		     void setWaitTime(struct timespec* ts, int64_t mills)
-			 {
-				 int64_t nanos = mills*  1000 * 1000;
-                 if (nanos < 1000000000LL)
-                 {
-                     ts->tv_sec = 0;
-                     ts->tv_nsec = (long) nanos;
-                 }
-                 else
-                 {
-                    ts->tv_sec = nanos / 1000000000;
-                    ts->tv_nsec = nanos % 1000000000;
-                 }
-			 }
-		public:
-			ThreadMutexLock()
-			{
-			}
-			ThreadMutexLock(ThreadMutex& mutex, ThreadCondition& cond) :
-					ThreadMutex(mutex), ThreadCondition(cond)
-			{
-			}
-			//ThreadMutexLock(ThreadMutexCondition& mutexCond);
-			/**
-			 * wait for specified timeout value, if timeout < 0, then wait for ever
-			 */
-			bool Wait(uint64_t timeout = 0)
-			{
-				if (timeout <= 0)
-				{
-					return 0 == pthread_cond_wait(&m_cond, &m_mutex);
-				}
-				else
-				{
-					struct timeval tp;
+    class ThreadMutexLock: public ThreadMutex, public ThreadCondition
+    {
+        private:
+            void setWaitTime(struct timespec* ts, int64_t now_micros, int64_t mills)
+            {
+                int64_t nanos =  now_micros * 1000 + mills* 1000 * 1000;
+                ts->tv_sec = nanos / 1000000000;
+                ts->tv_nsec = nanos % 1000000000;
+                //printf("###wait at %lld:%lld  %lld\n",ts->tv_sec, ts->tv_nsec, time(NULL) );
+            }
+        public:
+            ThreadMutexLock()
+            {
+            }
+            ThreadMutexLock(ThreadMutex& mutex, ThreadCondition& cond)
+                    : ThreadMutex(mutex), ThreadCondition(cond)
+            {
+            }
+            //ThreadMutexLock(ThreadMutexCondition& mutexCond);
+            /**
+             * wait for specified timeout value, if timeout < 0, then wait for ever
+             */
+            bool Wait(uint64_t timeout = 0)
+            {
+                if (timeout <= 0)
+                {
+                    return 0 == pthread_cond_wait(&m_cond, &m_mutex);
+                }
+                else
+                {
+                    struct timeval tp;
                     struct timespec ts;
                     gettimeofday(&tp, NULL);
-				    setWaitTime(&ts, timeout);
-					return 0 == pthread_cond_timedwait(&m_cond, &m_mutex, &ts);
-				}
-			}
-			virtual bool Notify()
-			{
-				return 0 == pthread_cond_signal(&m_cond);
-			}
-			virtual bool NotifyAll()
-			{
-				return 0 == pthread_cond_broadcast(&m_cond);
-			}
-			bool Lock()
-			{
-				return 0 == pthread_mutex_lock(&m_mutex);
-			}
-			bool Unlock()
-			{
-				return 0 == pthread_mutex_unlock(&m_mutex);
-			}
-			bool TryLock()
-			{
-				return 0 == pthread_mutex_trylock(&m_mutex);
-			}
-			virtual ~ThreadMutexLock()
-			{
-			}
-	};
+                    int64_t now_micros = ((int64_t) tp.tv_sec) * 1000*1000 + tp.tv_usec;
+                    setWaitTime(&ts, now_micros, timeout);
+                    return 0 == pthread_cond_timedwait(&m_cond, &m_mutex, &ts);
+                }
+            }
+            virtual bool Notify()
+            {
+                return 0 == pthread_cond_signal(&m_cond);
+            }
+            virtual bool NotifyAll()
+            {
+                return 0 == pthread_cond_broadcast(&m_cond);
+            }
+            bool Lock()
+            {
+                return 0 == pthread_mutex_lock(&m_mutex);
+            }
+            bool Unlock()
+            {
+                return 0 == pthread_mutex_unlock(&m_mutex);
+            }
+            bool TryLock()
+            {
+                return 0 == pthread_mutex_trylock(&m_mutex);
+            }
+            virtual ~ThreadMutexLock()
+            {
+            }
+    };
 }
 
 #endif /* COROXX_THREADMUTEXLOCK_HPP_ */

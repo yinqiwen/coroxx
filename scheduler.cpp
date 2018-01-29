@@ -130,10 +130,21 @@ namespace coroxx
         return 0;
     }
 
+    static int64_t nowMs()
+    {
+        struct timeval tp;
+        struct timespec ts;
+        gettimeofday(&tp, NULL);
+        return (((int64_t) tp.tv_sec) * 1000 * 1000 + tp.tv_usec) / 1000;
+    }
+
+
     void Scheduler::Routine(bool wait)
     {
        
+        //static int count = 0;
         CoroGC();
+        //count++;
         CoroDiaptchData* data = NULL;
         {
             coro_queue_mutex.Lock();
@@ -143,7 +154,9 @@ namespace coroxx
                 {
                     routine_wait_ms = 10;
                 }
+                //printf("###before wait %d %lld\n", routine_wait_ms, nowMs());
                 coro_queue_mutex.Wait(routine_wait_ms);
+                //printf("###after wait %d %lld %d\n", routine_wait_ms, nowMs(), v);
             }
             if (!coro_queue.empty())
             {
