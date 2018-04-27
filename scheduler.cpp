@@ -1,6 +1,7 @@
 #include "scheduler.h"
 #include "thread_local.h"
 #include <errno.h>
+#include <unistd.h>
 
 namespace coroxx
 {
@@ -37,14 +38,14 @@ namespace coroxx
             }
             void Invoke()
             {
-                 if (create_coro)
-                 {
+                if (create_coro)
+                {
                     StartCoro(CoroDiaptchData::InvokeFunc, this);
-                 }
-                 else
-                 {
+                }
+                else
+                {
                     CoroDiaptchData::InvokeFunc(this);
-                 }
+                }
             }
 
     };
@@ -54,8 +55,9 @@ namespace coroxx
             CoroPtr coro;
             void* data;
             CoroutineFunction func;
+            Scheduler* scheduler;
             CoroCallData()
-             : coro(NULL), data(NULL)
+                    : coro(NULL), data(NULL), scheduler(NULL)
             {
             }
     };
@@ -63,7 +65,7 @@ namespace coroxx
     static void CoroutineNonPoolFunc(void* cdata)
     {
         CoroCallData* data = (CoroCallData*) cdata;
-        Scheduler* scheduler = g_current_scheduler.GetValue();
+        Scheduler* scheduler = data->scheduler;
         CoroPtr coro = data->coro;
         if (data->func)
         {
@@ -74,13 +76,24 @@ namespace coroxx
             abort();
         }
         delete data;
-        scheduler->CoroDone(coro);
+        scheduler->CoroDone(coro, false);
+    }
 
+    static void CoroutinePoolFunc(void* cdata)
+    {
+        CoroCallData* data = (CoroCallData*) cdata;
+        Scheduler* scheduler = data->scheduler;
+        CoroPtr coro = data->coro;
+        while (1)
+        {
+            data->func(data->data);
+            scheduler->CoroDone(coro, true);
+        }
     }
 
     void* Scheduler::RunFunc(void* data)
     {
-        Scheduler* s = (Scheduler*)data;
+        Scheduler* s = (Scheduler*) data;
         s->Run();
         delete s;
         return NULL;
@@ -88,12 +101,21 @@ namespace coroxx
 
     int Scheduler::Start()
     {
-        pthread_attr_t attr;
-		pthread_attr_init(&attr);
-        if (0 != pthread_create(&tid, &attr, RunFunc, this))
-		{
-			return errno;
-		}
+        options.share_stack = CoroType::NewShareStack(options.share_stack_count, options.max_stack_size);
+        if (options.create_thread)
+        {
+            pthread_attr_t attr;
+            pthread_attr_init(&attr);
+            if (0 != pthread_create(&tid, &attr, RunFunc, this))
+            {
+                return errno;
+            }
+        }
+        else
+        {
+            g_current_scheduler.SetValue(this);
+            InitCoroPool();
+        }
         return 0;
     }
 
@@ -109,70 +131,71 @@ namespace coroxx
 
     int64_t Scheduler::CheckTimeQueue()
     {
-        while(!coro_time_queue.empty())
+        while (!coro_time_queue.empty())
         {
             TimeCoroDiaptchDataQueue::iterator it = coro_time_queue.begin();
             CoroDiaptchDataQueue& queue = it->second;
             int64_t ts = it->first;
             int64_t now = currentMills();
-            if(now < ts)
+            if (now < ts)
             {
                 return ts - now;
             }
             //printf("###time queue size:%d\n", queue.size());
-            for(size_t i = 0; i < queue.size(); i++)
+            for (size_t i = 0; i < queue.size(); i++)
             {
-                 CoroDiaptchData* data = queue[i];
-                 data->Invoke();
+                CoroDiaptchData* data = queue[i];
+                data->Invoke();
             }
             coro_time_queue.erase(it);
         }
         return 0;
     }
 
-    static int64_t nowMs()
+    uint32_t Scheduler::InvokeQueueSize()
     {
-        struct timeval tp;
-        struct timespec ts;
-        gettimeofday(&tp, NULL);
-        return (((int64_t) tp.tv_sec) * 1000 * 1000 + tp.tv_usec) / 1000;
+        uint32_t n = 0;
+        coro_queue_mutex.Lock();
+        n = coro_queue.size();
+        coro_queue_mutex.Unlock();
+        return n;
     }
-
 
     void Scheduler::Routine(bool wait)
     {
-       
-        //static int count = 0;
         CoroGC();
-        //count++;
-        CoroDiaptchData* data = NULL;
+        while (1)
         {
-            coro_queue_mutex.Lock();
-            if ((coro_queue.empty()) && wait)
+            CoroDiaptchData* data = NULL;
             {
-                if (routine_wait_ms <= 0 || routine_wait_ms > 100)
+                coro_queue_mutex.Lock();
+                if ((coro_queue.empty()) && wait)
                 {
-                    routine_wait_ms = 10;
+                    if (routine_wait_ms <= 0 || routine_wait_ms > 100)
+                    {
+                        routine_wait_ms = 10;
+                    }
+                    //printf("###before wait %d %lld\n", routine_wait_ms, nowMs());
+                    coro_queue_mutex.Wait(routine_wait_ms);
+                    //printf("###after wait %d %lld %d\n", routine_wait_ms, nowMs(), v);
                 }
-                //printf("###before wait %d %lld\n", routine_wait_ms, nowMs());
-                coro_queue_mutex.Wait(routine_wait_ms);
-                //printf("###after wait %d %lld %d\n", routine_wait_ms, nowMs(), v);
+                if (!coro_queue.empty())
+                {
+                    data = coro_queue.front();
+                    coro_queue.pop_front();
+                }
+                coro_queue_mutex.Unlock();
             }
-            if (!coro_queue.empty())
+
+            if (NULL == data)
             {
-                data = coro_queue.front();
-                coro_queue.pop_front();
+                routine_wait_ms = CheckTimeQueue();
+                return;
             }
-            coro_queue_mutex.Unlock();
-        }
-        if (NULL == data)
-        {
-            routine_wait_ms = CheckTimeQueue();
-        }
-        else
-        {
-            //printf("###Exec Data:%p\n", data);
-            data->Invoke();
+            else
+            {
+                data->Invoke();
+            }
         }
     }
 
@@ -188,10 +211,10 @@ namespace coroxx
     void Scheduler::Run()
     {
         g_current_scheduler.SetValue(this);
-        CoroType::SetCoroOptions(options);
-        main_coro = new CoroType(true);
-        main_coro->ResetContext(Scheduler::RoutineFunc, this);
-        main_coro->Resume();
+        InitCoroPool();
+        sched_coro = new CoroType(options);
+        sched_coro->ResetContext(Scheduler::RoutineFunc, this);
+        sched_coro->Resume();
     }
 
     void Scheduler::AddTimeCoroTask(CoroDiaptchData* data, int64_t wait_time)
@@ -203,7 +226,7 @@ namespace coroxx
 
     int Scheduler::StartCoroAfter(const CoroutineFunction& func, void* data, int64_t wait_time, bool create_coro)
     {
-        if(NULL == CoroSelf())
+        if (NULL == g_current_scheduler.GetValue())
         {
             return PushCoroTask(func, data, false, wait_time);
         }
@@ -213,6 +236,15 @@ namespace coroxx
         task->create_coro = create_coro;
         AddTimeCoroTask(task, wait_time);
         return 0;
+    }
+
+    void Scheduler::InitCoroPool()
+    {
+        for (size_t i = 0; i < options.init_coro_pool_num; i++)
+        {
+            CoroutineFunction empty;
+            coro_pool.push_back(CreateCoroutine(empty, NULL, true));
+        }
     }
 
     int Scheduler::PushCoroTask(const CoroutineFunction& func, void* data, bool create_coro, int64_t wait_time)
@@ -227,14 +259,22 @@ namespace coroxx
         task->create_coro = create_coro;
 
         coro_queue_mutex.Lock();
-        if(wait_time > 0)
+        if (wait_time > 0)
         {
-           AddTimeCoroTask(task, wait_time);
+            AddTimeCoroTask(task, wait_time);
         }
         else
         {
             coro_queue.push_back(task);
-            coro_queue_mutex.Notify();
+            if (options.eventfd > 0)
+            {
+                int64_t ev = 1;
+                ::write(options.eventfd, &ev, sizeof(ev));
+            }
+            else
+            {
+                coro_queue_mutex.Notify();
+            }
         }
         coro_queue_mutex.Unlock();
         return 0;
@@ -242,7 +282,6 @@ namespace coroxx
 
     void Scheduler::Wakeup(CoroPtr coro)
     {
-        //printf("####Wake Resume \n");
         coro->Resume();
     }
 
@@ -253,20 +292,31 @@ namespace coroxx
 
     void Scheduler::CoroGC()
     {
-        for(size_t i = 0 ;i < deleting_coros.size(); i++)
+        if(!deleting_coros.empty())
         {
-            delete deleting_coros[i];
+            for (size_t i = 0; i < deleting_coros.size(); i++)
+            {
+                delete deleting_coros[i];
+            }
+            deleting_coros.clear();
         }
-        deleting_coros.clear();
     }
 
-    void Scheduler::CoroDone(CoroPtr coro)
+    void Scheduler::CoroDone(CoroPtr coro, bool pool)
     {
         if (exec_table.erase(coro->id) > 0)
         {
             exec_coro_num--;
         }
-        deleting_coros.push_back(coro);
+        if (pool)
+        {
+            coro_pool.push_back(coro);
+        }
+        else
+        {
+            deleting_coros.push_back(coro);
+        }
+
         /*
          * Wake join coroutine first
          */
@@ -289,34 +339,73 @@ namespace coroxx
         return false;
     }
 
-    CoroPtr Scheduler::CreateCoroutine()
+    CoroPtr Scheduler::GetCoroutine(const CoroutineFunction& func, void* data)
     {
-        CoroPtr task = new CoroType();
+        if (coro_pool.empty())
+        {
+            return CreateCoroutine(func, data, false);
+        }
+        else
+        {
+            CoroPtr coro = coro_pool.front();
+            coro_pool.pop_front();
+            CoroutineDataContext& data_ctx = coro->GetDataContext();
+            CoroCallData* cdata = (CoroCallData*) data_ctx.data;
+            cdata->data = data;
+            cdata->func = func;
+            return coro;
+        }
+    }
+
+    CoroPtr Scheduler::CreateCoroutine(const CoroutineFunction& func, void* data, bool pool)
+    {
+        CoroPtr task = new CoroType(options);
+        CoroutineDataContext& data_ctx = task->GetDataContext();
+        CoroCallData* cdata = new CoroCallData;
+        data_ctx.data = cdata;
+        cdata->data = data;
+        cdata->coro = task;
+        cdata->func = func;
+        cdata->scheduler = this;
+        if (pool)
+        {
+            data_ctx.func = CoroutinePoolFunc;
+        }
+        else
+        {
+            data_ctx.func = CoroutineNonPoolFunc;
+        }
+
         return task;
     }
-    coro_id Scheduler::StartCoro(const CoroutineFunction& func, void* data)
+    coro_id Scheduler::StartCoro(const CoroutineFunction& func, void* data, bool create_coro)
     {
-        if(NULL == CoroSelf())
+        //start from another thread
+        if (NULL == g_current_scheduler.GetValue())
         {
-            return PushCoroTask(func, data, true, 0);
+            return PushCoroTask(func, data, create_coro, 0);
         }
         if (IsOverload())
         {
             return (coro_id) -1;
         }
-        CoroPtr task = CreateCoroutine();
+        CoroGC();
+        CoroPtr task = GetCoroutine(func, data);
         coro_id id = task->id;
-        exec_table[task->id] = task;
+        exec_table[id] = task;
         exec_coro_num++;
-        CoroutineDataContext& data_ctx = task->GetDataContext();
-        CoroCallData* cdata = new CoroCallData;;
-        data_ctx.data = cdata;
-        cdata->data = data;
-        cdata->coro = task;
-        cdata->func = func;
-        data_ctx.func = CoroutineNonPoolFunc;
         Wakeup(task);
         return id;
+    }
+
+    CoroPtr Scheduler::GetCoroById(coro_id id)
+    {
+        CoroutineTable::iterator found = exec_table.find(id);
+        if (found != exec_table.end())
+        {
+            return found->second;
+        }
+        return NULL;
     }
 
     int Scheduler::Join(coro_id cid)
@@ -378,7 +467,6 @@ namespace coroxx
         g_scheduler_manager = new SchedulerManager(opt);
         return 0;
     }
-
 
     uint32_t SchedulerManager::GetRunningCoroNum()
     {
@@ -465,7 +553,7 @@ namespace coroxx
 
     static void CoroSleepCB(void* data)
     {
-        CoroPtr coro = (CoroPtr)data;
+        CoroPtr coro = (CoroPtr) data;
         //printf("####Sleep Resume \n");
         coro->Resume();
     }

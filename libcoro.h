@@ -9,24 +9,17 @@ namespace coroxx
     struct LibCoroCoroutine;
     struct CoroStack
     {
-            coro_stack* stack;
+            coro_stack stack;
             LibCoroCoroutine* coro;
             bool shared;
             CoroStack(uint32_t stack_size, bool share)
-                    : stack(NULL), coro(NULL),shared(share)
+                    : coro(NULL), shared(share)
             {
-                stack = (coro_stack*) malloc(sizeof(coro_stack));
-                coro_stack_alloc(stack, stack_size);
-                //memset(stack->sptr, 0, stack->ssze);
+                coro_stack_alloc(&stack, stack_size);
             }
             ~CoroStack()
             {
-                //printf("##delete stack!\n");
-                if (NULL != stack)
-                {
-                    coro_stack_free(stack);
-                    free(stack);
-                }
+                coro_stack_free(&stack);
             }
     };
     struct LibCoroCoroutine
@@ -35,17 +28,13 @@ namespace coroxx
             CoroStack* stack;
             coro_id id;
             CoroutineDataContext data_ctx;
+            bool ctx_inited;
+            bool waiting;
             void* save_buffer;
             size_t save_buffer_size;
             char* stack_sp;
-            bool init_ctx;
-            bool main_coro;
-            bool waiting;
-            LibCoroCoroutine(bool mainCoro = false);
+            LibCoroCoroutine(const CoroOptions& opt, bool main = false);
             ~LibCoroCoroutine();
-            void SaveStackBuffer();
-            void ResumeStackBuffer();
-            void MarkStackResumePoint();
             void ResetContext(const CoroutineFunction& func, void* data)
             {
                 data_ctx.data = data;
@@ -55,6 +44,9 @@ namespace coroxx
             {
                 return data_ctx;
             }
+            void SaveStackBuffer();
+            void ResumeStackBuffer();
+            void MarkStackResumePoint();
             void Wait();
             void Yield(bool release_current = false);
             void Resume(bool release_current = false);
@@ -63,7 +55,7 @@ namespace coroxx
                 return id;
             }
             static LibCoroCoroutine* CurrentCoro();
-            static void SetCoroOptions(const CoroOptions& opt);
+            static void* NewShareStack(int count, int size);
 
     };
 }

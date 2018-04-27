@@ -35,13 +35,19 @@ namespace coroxx
 
     struct CoroOptions
     {
-        uint32_t max_stack_size;
-        uint32_t max_coro_num;
-        uint32_t sheduler_num;
-        uint32_t share_stack_count;
-        CoroOptions():max_stack_size(0),max_coro_num(10000),sheduler_num(1),share_stack_count(16)
-        {
-        }
+            bool create_thread;
+            uint32_t max_stack_size;
+            uint32_t max_coro_num;
+            uint32_t init_coro_pool_num;
+            uint32_t sheduler_num;
+            uint32_t share_stack_count;
+            int eventfd;
+            void* share_stack;
+            CoroOptions()
+                    : create_thread(true), max_stack_size(0), max_coro_num(10000), init_coro_pool_num(0), sheduler_num(
+                            1), share_stack_count(16), eventfd(-1), share_stack(NULL)
+            {
+            }
     };
 }
 

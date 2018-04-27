@@ -8,7 +8,7 @@
 
 namespace coroxx
 {
-    typedef std::set<LibCoroCoroutine*> CoroutineSet;
+    typedef std::stack<LibCoroCoroutine*> CoroutineStack;
     static uint64_t g_coro_id_seed = 0;
 
     struct CoroShareStackPool
@@ -23,6 +23,7 @@ namespace coroxx
             {
                 return pool.size();
             }
+
     };
 
     static void swapCoroFunc(void* data);
@@ -51,17 +52,38 @@ namespace coroxx
 
     struct CoroEnv
     {
-            coro_context init_ctx;
             LibCoroCoroutine* current;
             LibCoroCoroutine* main;
-            CoroutineSet coro_set;
+            CoroutineStack coro_stack;
             CoroShareStackPool share_stack_pool;
             SwapContext swap_ctx;
             uint32_t stack_size;
             uint32_t share_stack_count;
+
             CoroEnv()
                     : current(NULL), main(NULL), stack_size(0), share_stack_count(0)
             {
+            }
+            CoroStack* GetCoroStack()
+            {
+                if (share_stack_pool.size() < share_stack_count)
+                {
+                    CoroStack* s = new CoroStack(stack_size, true);
+                    share_stack_pool.pool.push_back(s);
+                    return s;
+                }
+                if (share_stack_pool.pool.empty())
+                {
+                    return new CoroStack(stack_size, false);
+                }
+                size_t idx = share_stack_pool.cursor;
+                if (idx >= share_stack_pool.size())
+                {
+                    idx = 0;
+                    share_stack_pool.cursor = 0;
+                }
+                share_stack_pool.cursor++;
+                return share_stack_pool.pool[idx];
             }
     };
     static ThreadLocal<CoroEnv> g_env;
@@ -69,30 +91,6 @@ namespace coroxx
     static inline CoroEnv& getCoroEnv()
     {
         return g_env.GetValue();
-    }
-
-    static CoroStack* GetCoroStackFromPool()
-    {
-        CoroEnv& coro_env = getCoroEnv();
-        CoroShareStackPool& pool = coro_env.share_stack_pool;
-        if (pool.size() < coro_env.share_stack_count)
-        {
-            CoroStack* s = new CoroStack(coro_env.stack_size, true);
-            pool.pool.push_back(s);
-            return s;
-        }
-        if (pool.pool.empty())
-        {
-            return new CoroStack(coro_env.stack_size, false);
-        }
-        size_t idx = pool.cursor;
-        if (idx >= pool.size())
-        {
-            idx = 0;
-            pool.cursor = 0;
-        }
-        pool.cursor++;
-        return pool.pool[idx];
     }
 
     static void LibCoroFunc(void* data)
@@ -116,37 +114,38 @@ namespace coroxx
         }
     }
 
-    LibCoroCoroutine::LibCoroCoroutine(bool mainCoro)
-            : stack(NULL), id(0), save_buffer(NULL), save_buffer_size(0), stack_sp(NULL), init_ctx(false), main_coro(
-                    mainCoro), waiting(false)
+    LibCoroCoroutine::LibCoroCoroutine(const CoroOptions& opt, bool main)
+            : stack(NULL), id(0), ctx_inited(false), waiting(false), save_buffer(NULL), save_buffer_size(0), stack_sp(
+            NULL)
     {
         id = g_coro_id_seed++;
         data_ctx.coro = this;
-        if (main_coro)
+
+        g_create_mutex.Lock();
+        if (main)
         {
-            getCoroEnv().main = this;
+            coro_create(&ctx, NULL, NULL, NULL, 0);
+            ctx_inited = true;
         }
-        //printf("####Create %d %d\n", id, main_coro);
+        g_create_mutex.Unlock();
     }
+
     void LibCoroCoroutine::SaveStackBuffer()
     {
-        if (NULL != stack && NULL != stack_sp)
+        if (NULL != stack && stack->shared && NULL != stack_sp)
         {
-
             if (NULL != save_buffer)
             {
                 free(save_buffer);
             }
             save_buffer = malloc(save_buffer_size);
             memcpy(save_buffer, stack_sp, save_buffer_size);
-            //printf("####SaveStackBuffer %d %d %p %p\n", id,save_buffer_size,stack_sp, save_buffer);
         }
     }
     void LibCoroCoroutine::ResumeStackBuffer()
     {
-        if (NULL != save_buffer && NULL != stack)
+        if (NULL != save_buffer && NULL != stack && stack->shared)
         {
-            //printf("####ResumeStackBuffer %d %d %p %p\n", id,save_buffer_size,stack_sp,save_buffer);
             memcpy(stack_sp, save_buffer, save_buffer_size);
             free(save_buffer);
             save_buffer = NULL;
@@ -157,13 +156,12 @@ namespace coroxx
     }
     void LibCoroCoroutine::MarkStackResumePoint()
     {
-        if (NULL != stack)
+        if (NULL != stack && stack->shared)
         {
             char c;
             stack_sp = &c;
-            save_buffer_size = ((char*) stack->stack->sptr + stack->stack->ssze) - stack_sp;
-            // stack_sp = (char*)(stack->stack->sptr);
-            // save_buffer_size = stack->stack->ssze;
+            save_buffer_size = ((char*) stack->stack.sptr + stack->stack.ssze) - stack_sp;
+            //printf("###[%d, %lld]Save buffer size:%lld\n", id, stack->stack.ssze, save_buffer_size);
         }
     }
 
@@ -186,12 +184,8 @@ namespace coroxx
         if (NULL != save_buffer)
         {
             free(save_buffer);
-            save_buffer = NULL;
         }
         coro_destroy(&ctx);
-        CoroutineSet& coro_set = getCoroEnv().coro_set;
-        coro_set.erase(this);
-        //printf("####Free %d\n", id);
     }
 
     void LibCoroCoroutine::Wait()
@@ -202,75 +196,73 @@ namespace coroxx
 
     void LibCoroCoroutine::Yield(bool release_current)
     {
-        CoroutineSet& coro_set = getCoroEnv().coro_set;
+        CoroutineStack& coro_stack = getCoroEnv().coro_stack;
         LibCoroCoroutine* next = getCoroEnv().main;
-        if (!coro_set.empty())
+        if (!coro_stack.empty())
         {
-            CoroutineSet::iterator begin = coro_set.begin();
-            next = *begin;
-            coro_set.erase(begin);
+            next = coro_stack.top();
+            coro_stack.pop();
         }
-        //printf("####Yield form %d->%d\n",  id, next->id);
         next->Resume(release_current);
+
     }
     void LibCoroCoroutine::Resume(bool release_current)
     {
         CoroEnv& coro_env = getCoroEnv();
-        CoroutineSet& coro_set = coro_env.coro_set;
+        CoroutineStack& coro_stack = getCoroEnv().coro_stack;
         LibCoroCoroutine* current = coro_env.current;
         coro_context* current_ctx = NULL;
         if (NULL == current)
         {
-            current_ctx = &(coro_env.init_ctx);
-            coro_create(current_ctx, NULL, NULL, NULL, 0);
+            if (NULL == coro_env.main)
+            {
+                CoroOptions opt;
+                coro_env.main = new LibCoroCoroutine(opt, true);
+            }
+            current_ctx = &(coro_env.main->ctx);
         }
         else
         {
             current_ctx = &(current->ctx);
-            //printf("####Resume form %d->%d %d\n", current->id, id, release_current);
         }
-        if (NULL != current && !current->waiting && !release_current && current != coro_env.main)
+        if (NULL != current && !current->waiting && !release_current)
         {
-            coro_set.insert(current);
+            coro_stack.push(current);
         }
-
         coro_env.current = this;
         waiting = false;
-        if (NULL == stack && !init_ctx)
+        if (NULL == stack && !ctx_inited)
         {
-            if (main_coro)
+            stack = coro_env.GetCoroStack();
+            //stack = new CoroStack(coro_env.stack_size, false);
+        }
+
+        LibCoroCoroutine* save_coro = NULL;
+        if (NULL != stack && stack->coro && stack->coro != this)
+        {
+            save_coro = stack->coro;
+            if (save_coro == current && release_current)
             {
-                stack = new CoroStack(coro_env.stack_size, false);
-            }
-            else
-            {
-                stack = GetCoroStackFromPool();
+                save_coro = NULL;
             }
         }
-        LibCoroCoroutine* save_coro = NULL;
         if (NULL != stack)
         {
-            if (stack->coro && stack->coro != this)
-            {
-                save_coro = stack->coro;
-                if (save_coro == current && release_current)
-                {
-                    save_coro = NULL;
-                }
-            }
             stack->coro = this;
         }
-
-        if (!init_ctx)
+//        if(NULL != save_coro)
+//        {
+//            //save_coro->MarkStackResumePoint();
+//        }
+        if (!ctx_inited)
         {
-            //TC_LockT<TC_ThreadMutex> lock(g_coro_create_mutex);å
             g_create_mutex.Lock();
-            coro_create(&ctx, LibCoroFunc, &data_ctx, stack->stack->sptr, stack->stack->ssze);
+            coro_create(&ctx, LibCoroFunc, &data_ctx, stack->stack.sptr, stack->stack.ssze);
             g_create_mutex.Unlock();
-            init_ctx = true;
+            ctx_inited = true;
         }
 
-        if (NULL != save_coro)
+        if (NULL != save_coro && current != save_coro)
         {
             save_coro->SaveStackBuffer();
         }
@@ -288,15 +280,17 @@ namespace coroxx
             }
             ResumeStackBuffer();
         }
-        coro_transfer(current_ctx, &(this->ctx));
+        coro_transfer(current_ctx, &ctx);
+
     }
     LibCoroCoroutine* LibCoroCoroutine::CurrentCoro()
     {
         return getCoroEnv().current;
     }
-    void LibCoroCoroutine::SetCoroOptions(const CoroOptions& opt)
+    void* LibCoroCoroutine::NewShareStack(int count, int size)
     {
-        getCoroEnv().stack_size = opt.max_stack_size;
-        getCoroEnv().share_stack_count = opt.share_stack_count;
+        getCoroEnv().share_stack_count = count;
+        getCoroEnv().stack_size = size;
+        return NULL;
     }
 }

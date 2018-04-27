@@ -3,6 +3,7 @@
 	<name>coroxx</name>
 	<comment></comment>
 	<projects>
+		<project>libco</project>
 	</projects>
 	<buildSpec>
 		<buildCommand>

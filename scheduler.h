@@ -37,8 +37,10 @@ namespace coroxx
             ThreadMutexLock coro_queue_mutex;
 
             typedef std::vector<CoroPtr> CoroArray;
+            typedef std::deque<CoroPtr> CoroQueue;
             CoroArray deleting_coros;
-            CoroPtr main_coro;
+            CoroQueue coro_pool;
+            CoroPtr sched_coro;
             int64_t routine_wait_ms;
             int64_t exec_coro_num;
             CoroOptions options;
@@ -46,15 +48,17 @@ namespace coroxx
             static void* RunFunc(void* data);
             static void RoutineFunc(void* data);
             CoroPtr GetCoroutineById(coro_id id);
-            CoroPtr CreateCoroutine();
+            CoroPtr CreateCoroutine(const CoroutineFunction& func, void* data, bool pool);
+            CoroPtr GetCoroutine(const CoroutineFunction& func, void* data);
             void CoroGC();
             int64_t CheckTimeQueue();
             void AddTimeCoroTask(CoroDiaptchData* data, int64_t wait_time);
             bool IsOverload();
             int PushCoroTask(const CoroutineFunction& func, void* data, bool create_coro, int64_t wait_time = 0);
+            void InitCoroPool();
         public:
             Scheduler(const CoroOptions& opt)
-                    : main_coro(NULL),routine_wait_ms(10),exec_coro_num(0),options(opt)
+                    : tid(0),sched_coro(NULL),routine_wait_ms(10),exec_coro_num(0),options(opt)
             {
             }
             int Start();
@@ -70,10 +74,12 @@ namespace coroxx
              */
             void Wait(CoroPtr coro);
 
-            void CoroDone(CoroPtr coro);
+            void CoroDone(CoroPtr coro, bool pool);
 
-            coro_id StartCoro(const CoroutineFunction& func, void* data);
+            coro_id StartCoro(const CoroutineFunction& func, void* data, bool create_coro = true);
             int StartCoroAfter(const CoroutineFunction& func, void* data, int64_t wait_time, bool create_coro = true);
+
+            CoroPtr GetCoroById(coro_id id);
 
             int Join(coro_id cid);
             int Join(coro_id c1, coro_id c2);
@@ -81,8 +87,14 @@ namespace coroxx
 
             uint32_t GetCoroNum()
             {
-                return exec_coro_num;
+                //return exec_coro_num;
+                return exec_table.size() + deleting_coros.size();
             }
+            uint32_t GetRetiredCoroNum()
+            {
+                return deleting_coros.size();
+            }
+            uint32_t InvokeQueueSize();
 
             static bool IsInMainCoro();
     };
@@ -108,6 +120,7 @@ namespace coroxx
     CoroPtr CoroSelf();
     void WaitCoro(CoroPtr coro);
     void CoroSleep(int64_t ms);
+
 
 }
 
