@@ -5,3 +5,5 @@
 .*
 !/.gitignore
 core
+.projects
+.settings
